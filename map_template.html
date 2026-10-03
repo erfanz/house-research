@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sedona Sales Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.4 system-ui,sans-serif;display:flex;height:100vh;color:#222}
+#panel{width:290px;padding:16px;overflow:auto;border-right:1px solid #ddd;background:#fafafa}
+#map{flex:1}
+h1{font-size:17px;margin:0 0 12px}
+label{display:block;font-weight:600;margin:14px 0 4px}
+select,input[type=range]{width:100%}
+select{padding:5px}
+.val{font-weight:400;color:#555}
+#count{margin-top:16px;padding:8px;background:#fff;border:1px solid #ddd;border-radius:6px}
+button{margin-top:10px;padding:6px 10px}
+.legend span{display:inline-block;width:11px;height:11px;border-radius:50%;margin:0 4px 0 8px;vertical-align:-1px}
+.star{font-size:26px;line-height:26px;text-align:center;text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff}
+.fpop img{width:240px;border-radius:4px;display:block;margin-bottom:6px}
+.note{font-size:12px;color:#666;margin-top:12px}
+@media(max-width:700px){body{flex-direction:column-reverse}#panel{width:100%;height:42vh;border-right:0;border-top:1px solid #ddd}}
+</style></head><body>
+<div id="panel">
+<h1>Sedona home sales</h1>
+<label>Min price: <span class="val" id="pminv"></span></label><input type="range" id="pmin">
+<label>Max price: <span class="val" id="pmaxv"></span></label><input type="range" id="pmax">
+<label>Sale date</label>
+<select id="date"><option value="0">Any (last 2 years)</option><option value="3">Last 3 months</option><option value="6">Last 6 months</option><option value="12">Last year</option><option value="24">Last 2 years</option></select>
+<label>Bedrooms</label>
+<select id="beds"><option value="0">Any</option><option value="2">2+</option><option value="3">3+</option><option value="4">4+</option><option value="5">5+</option></select>
+<label>Pool</label>
+<select id="pool"><option value="any">Any</option><option value="1">Has pool</option><option value="0">No pool</option></select>
+<label>Red rock view</label>
+<select id="rr"><option value="0">Any</option><option value="1">Glimpse or better (1+)</option><option value="2">Clear view (2+)</option><option value="3">Dominant view (3)</option></select>
+<label>Deal rank (photo-based)</label>
+<select id="rank"><option value="0">All homes</option><option value="10">Top 10</option><option value="30">Top 30</option><option value="60">Top 60</option><option value="206">Ranked homes only</option></select>
+<label>Sold below formula price</label>
+<select id="gap"><option value="-999">Any</option><option value="0">Any amount below (0%+)</option><option value="10">10%+ below</option><option value="20">20%+ below</option><option value="30">30%+ below</option></select>
+<label>Colour dots by</label>
+<select id="color"><option value="rr">Red rock rating</option><option value="gap">Sold vs formula price</option></select>
+<div id="addbox" style="margin-top:14px"><label style="margin-top:0">Add a favorite (Redfin link)</label>
+<input type="text" id="addurl" placeholder="https://www.redfin.com/AZ/Sedona/…/home/123456" style="width:100%;padding:5px"><button id="addbtn">Add</button>
+<div id="addmsg" class="note" style="white-space:pre-wrap"></div></div>
+<label style="font-weight:400"><input type="checkbox" id="favs" checked> Show my favorites (<span id="nfav"></span>)</label>
+<label style="font-weight:400"><input type="checkbox" id="grid"> Show 2 km grid cells (price level)</label>
+<button id="reset">Reset filters</button>
+<div id="count"></div>
+<div class="note legend" id="leg"></div>
+<div class="note">Formula price = what a model fitted on the other sales (sqft, lot, age, view, red rock, pool, forest, renovation, neighbourhood level) predicts for the home; it never saw this sale. Typical miss about 12%, so gaps under ~12% are noise. Cells: green = pricier than the citywide norm after adjusting for size/lot/age, red = cheaper; thin cells (few sales) are rough.</div>
+<div class="note">&#9733; Favorites (not filtered): <span style="color:#0a8a3a">green</span> = asking below the fair range, <span style="color:#e0a100">amber</span> = inside, <span style="color:#c4452b">red</span> = above, grey = sold or no range. Manage with favorites.py.</div>
+<div class="note">Pool and red-rock ratings come from listing text and photos; homes without a rating are hidden when those filters are active.</div>
+</div>
+<div id="map"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const DATA=__DATA__;
+const FAVS=__FAVS__;
+const LIVE=location.protocol.startsWith('http');   // true only when served by `favorites.py serve`
+async function post(path,body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return r.json()}
+const CELLS=__CELLS__;
+const $=id=>document.getElementById(id);
+const fmt=n=>'$'+n.toLocaleString();
+const prices=DATA.map(d=>d.p), PMIN=Math.floor(Math.min(...prices)/50000)*50000, PMAX=Math.ceil(Math.max(...prices)/50000)*50000;
+for(const id of ['pmin','pmax']){const e=$(id);e.min=PMIN;e.max=PMAX;e.step=50000}
+const map=L.map('map');
+const esri=(n,at)=>L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/'+n+'/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:at||'Tiles &copy; Esri'});
+const street=esri('World_Street_Map').addTo(map);
+L.control.layers({'Street':street,'Topo':esri('World_Topo_Map'),'Satellite':esri('World_Imagery')},null,{position:'topright'}).addTo(map);
+const colors=['#bbb','#f2b66d','#e0662a','#a4210f'];
+function gapColor(g){if(g==null)return '#bbb';if(g>=30)return '#0a6b2d';if(g>=15)return '#4aa564';if(g>=5)return '#a9d8a0';if(g>-5)return '#f1ecd0';if(g>-15)return '#f4b27a';return '#c4452b'}
+function dotColor(d){return $('color').value==='gap'?gapColor(d.fg):colors[d.rr||0]}
+function legend(){$('leg').innerHTML=$('color').value==='gap'
+ ?'Sold vs formula price:<br><span style="background:#0a6b2d"></span>30%+ below<span style="background:#4aa564"></span>15-30<span style="background:#a9d8a0"></span>5-15<span style="background:#f1ecd0"></span>within 5%<span style="background:#f4b27a"></span>5-15 above<span style="background:#c4452b"></span>15%+ above<span style="background:#bbb"></span>no formula'
+ :'Red rock rating:<br><span style="background:#bbb"></span>0/unknown<span style="background:#f2b66d"></span>1<span style="background:#e0662a"></span>2<span style="background:#a4210f"></span>3'}
+const layer=L.layerGroup().addTo(map);
+const markers=DATA.map(d=>{
+  const m=L.circleMarker([d.lat,d.lng],{radius:7,color:'#333',weight:1,fillColor:colors[d.rr||0],fillOpacity:.9});
+  m.bindPopup(`${d.img?`<img src="${d.img}" style="width:240px;border-radius:4px;display:block;margin-bottom:6px">`:''}<b><a href="${d.u}" target="_blank" rel="noopener">${d.a}</a></b><br>${fmt(d.p)} &middot; sold ${d.d}<br>${d.b??'?'} bd / ${d.ba??'?'} ba${d.s?' &middot; '+d.s.toLocaleString()+' sqft':''}<br>Lot: ${d.l?d.l.toLocaleString()+' sqft ('+(d.l/43560).toFixed(2)+' ac)':'unknown'}<br>Pool: ${d.pool==null?'unknown':d.pool?'yes':'no'}<br>Red rock view: ${d.rr==null?'unknown':d.rr+' / 3'}${d.rk?'<br>Deal rank: #'+d.rk+' of 206':''}${d.fp?'<br>Formula price: '+fmt(d.fp)+' &rarr; sold '+(d.fg>=0?d.fg.toFixed(0)+'% below':(-d.fg).toFixed(0)+'% above'):''}`);
+  return m;
+});
+map.fitBounds(L.latLngBounds(DATA.map(d=>[d.lat,d.lng])).pad(.05));
+const VC={good:'#0a8a3a',fair:'#e0a100',bad:'#c4452b',none:'#777'};
+const favLayer=L.layerGroup().addTo(map);
+$('nfav').textContent=FAVS.length;
+FAVS.forEach(f=>{
+  const m=L.marker([f.lat,f.lng],{zIndexOffset:1000,icon:L.divIcon({className:'',iconSize:[28,28],iconAnchor:[14,14],html:`<div class="star" style="color:${VC[f.vc]}">&#9733;</div>`})});
+  const rng=f.rng?`${fmt(f.rng[0])} &ndash; ${fmt(f.rng[1])} (est. ${fmt(f.mid)})`:`not computed &ndash; ${f.why}`;
+  m.bindPopup(`<div class="fpop">${f.img?`<img src="${f.img}">`:''}<b><a href="${f.u}" target="_blank" rel="noopener">${f.a}</a></b> &#9733; favorite<br>${f.status==='sold'?'Sold '+fmt(f.price)+' on '+f.sd:(f.status+', asking '+fmt(f.price))}<br>${f.b??'?'} bd / ${f.ba??'?'} ba &middot; ${f.s?f.s.toLocaleString()+' sqft':'?'} &middot; lot ${f.l?f.l.toLocaleString():'?'} sqft &middot; built ${f.yb??'?'}<br>Red rock view: ${f.rr==null?'<i>not rated yet</i>':f.rr+' / 3'+(f.conf==='low'?' (low confidence)':'')}<br>Fair range: ${rng}${f.pct==null?'':'<br>'+(f.status==='sold'?'Sold':'Asking')+' is '+(f.pct>=0?f.pct.toFixed(1)+'% above':(-f.pct).toFixed(1)+'% below')+' the estimate'}${f.verdict?'<br><b style="color:'+VC[f.vc]+'">'+f.verdict+'</b>':''}${LIVE?`<br><button class="rmfav" data-id="${f.id}" style="color:#a00">Remove from favorites</button>`:''}${f.prov?'<br><i>Provisional: no photo rating yet</i>':''}</div>`,{maxWidth:280});
+  favLayer.addLayer(m)});
+$('favs').onchange=()=>{$('favs').checked?favLayer.addTo(map):map.removeLayer(favLayer)};
+const gridLayer=L.layerGroup();
+CELLS.forEach(c=>{const t=Math.max(-1,Math.min(1,c.e/25));
+ const r=L.rectangle(c.b,{color:'#555',weight:1,fillColor:t>=0?'#1e8c46':'#c4452b',fillOpacity:.08+.35*Math.abs(t)});
+ r.bindTooltip(`${c.e>=0?'+':''}${c.e.toFixed(0)}% vs citywide norm &middot; ${c.n} sales in 5 yr &middot; median $${c.pp}/sqft<br>${c.ex}`,{sticky:true});
+ gridLayer.addLayer(r)});
+function cutoff(months){const t=new Date();t.setMonth(t.getMonth()-months);return t.toISOString().slice(0,10)}
+function apply(){
+  let lo=+$('pmin').value, hi=+$('pmax').value;
+  if(lo>hi){[lo,hi]=[hi,lo]}
+  $('pminv').textContent=fmt(lo);$('pmaxv').textContent=fmt(hi);
+  const mo=+$('date').value, cut=mo?cutoff(mo):'0000';
+  const beds=+$('beds').value, pool=$('pool').value, rr=+$('rr').value, rkN=+$('rank').value, gapMin=+$('gap').value;
+  layer.clearLayers();let n=0;
+  DATA.forEach((d,i)=>{
+    if(d.p<lo||d.p>hi||d.d<cut||(beds&&(d.b==null||d.b<beds))) return;
+    if(pool!=='any'&&d.pool!==+pool) return;
+    if(rr&&(d.rr==null||d.rr<rr)) return;
+    if(rkN&&(d.rk==null||d.rk>rkN)) return;
+    if(gapMin>-999&&(d.fg==null||d.fg<gapMin)) return;
+    markers[i].setStyle({fillColor:dotColor(d)});
+    layer.addLayer(markers[i]);n++;
+  });
+  $('count').textContent=`${n} of ${DATA.length} homes shown`;
+}
+$('pmin').value=PMIN;$('pmax').value=PMAX;
+document.querySelectorAll('#panel select,#panel input').forEach(e=>e.addEventListener('input',apply));
+$('grid').onchange=()=>{$('grid').checked?gridLayer.addTo(map):map.removeLayer(gridLayer)};
+$('color').addEventListener('input',legend);
+$('reset').onclick=()=>{$('rank').value='0';$('gap').value='-999';$('pmin').value=PMIN;$('pmax').value=PMAX;$('date').value='0';$('beds').value='0';$('pool').value='any';$('rr').value='0';apply()};
+if(!LIVE){$('addurl').disabled=true;$('addbtn').disabled=true;$('addmsg').textContent='To add/remove here, run: python3 favorites.py serve  and open http://localhost:8765'}
+$('addbtn').onclick=async()=>{const url=$('addurl').value.trim();if(!url)return;
+  $('addbtn').disabled=true;$('addmsg').textContent='Adding… fetching the page, photos and rating can take a minute or two.';
+  try{const j=await post('/api/add',{url});$('addmsg').textContent=j.msg;if(j.ok)setTimeout(()=>location.reload(),1500)}
+  catch(e){$('addmsg').textContent='Request failed: '+e}
+  $('addbtn').disabled=false};
+map.on('popupopen',e=>{const b=e.popup.getElement().querySelector('.rmfav');if(!b)return;
+  b.onclick=async()=>{if(!confirm('Remove this house from your favorites?'))return;b.disabled=true;
+    try{const j=await post('/api/remove',{id:b.dataset.id});if(j.ok)location.reload();else alert(j.msg)}catch(err){alert('Request failed: '+err)}}});
+legend();apply();
+</script></body></html>
